@@ -6,7 +6,7 @@ from forest.constants import Frequency
 from dateutil import tz
 from datetime import datetime, timedelta
 from time import perf_counter
-
+import sys
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,7 @@ def load_raw_data(d_datetime, dates_shifted, source_folder, file_list, tz_str="U
 
     # check if there is at least one file for a given day
     if len(file_ind) <= 0:
+        logger.info(f"No data found for date: {d_datetime}")
         return data
 
     # load data for a given day
@@ -255,14 +256,28 @@ def calculate_daily_metrics(df):
     avg_enmo = np.mean(enmo)
 
     #MX metrics
-    m5 = enmo[M5 - 1]
-    m15 = enmo[M15 - 1]
-    m30 = enmo[M30 - 1]
-    m60 = enmo[M60 - 1]
-    m120 = enmo[M120 - 1]
+    l = len(enmo)
+
+    m5 = -1
+    m15 = -1
+    m30 = -1
+    m60 = -1
+    m120 = -1
+
+    if l >= M5:
+        m5 = enmo[M5 - 1]
+    if l >= M15:
+        m15 = enmo[M15 - 1]
+    if l >= M30:
+        m30 = enmo[M30 - 1]
+    if l >= M60:
+        m60 = enmo[M60 - 1]
+    if l >= M120:
+        m120 = enmo[M120 - 1]
 
     #wear/non-wear ratio
-    wear_ratio = sum(df['non_wear_2'] == 0) / sum(df['non_wear_2'] == 1)
+    frac_wear = sum(df['non_wear_2'] == 0) / len(df)
+    frac_non_wear = sum(df['non_wear_2'] == 1) / len(df)
     day = df.index[0].strftime('%Y-%m-%d')
     res = {
         "day":day,
@@ -274,7 +289,8 @@ def calculate_daily_metrics(df):
         "m30":m30,
         "m60":m60,
         "m120":m120,
-        "wear_ratio":wear_ratio
+        "frac_wear":frac_wear,
+        "frac_non_wear":frac_non_wear
     }
 
     t2 = perf_counter()
@@ -287,7 +303,7 @@ def calculate_daily_metrics(df):
 def process_activity_metrics(study_folder: str, output_folder: str, beiwe_id: str, tz_str: str = None,
                              frequency: Frequency = Frequency.DAILY, time_start: str = None,
                              time_end: str = None, convert_to_g_unit=False, epoch_size="1min",
-                             coverage_threshold=0.8, sd_non_wear_threshold=0.004, non_wear_window=30) -> None:
+                             coverage_threshold=0.6, sd_non_wear_threshold=0.004, non_wear_window=30) -> None:
 
     t1 = perf_counter()
 
@@ -313,6 +329,9 @@ def process_activity_metrics(study_folder: str, output_folder: str, beiwe_id: st
     source_folder = os.path.join(study_folder, user, "accelerometer")
     file_list = os.listdir(source_folder)
     file_list.sort()
+    if len(file_list) == 0:
+        logger.info(f"No files found for {user}")
+        sys.exit(0)
     # transform all files in folder to datelike format
     if "+00_00.csv" in file_list[0]:
         file_dates = [file.replace("+00_00.csv", "") for file in file_list]
@@ -370,17 +389,19 @@ def process_activity_metrics(study_folder: str, output_folder: str, beiwe_id: st
         logger.info(f"Processing day {str(d_ind)}/{str(len(days))}: {d_datetime}")
 
         #split data into 1 min chunks, or epochs
-
         data = load_raw_data(d_datetime, dates_shifted, source_folder, file_list, tz_str)
+        if len(data) == 0:
+            continue
         if convert_to_g_unit == True:
             data = data/G_UNIT
 
         #group data into 1 min epochs
         epochs = data.resample(epoch_size)
-        #meta = compile_epoch_metadata(epochs)
+        meta = compile_epoch_metadata(epochs)
+        print(meta)
         #meta_days[d_datetime] = meta
         coverage = calculate_day_coverage(epochs)
-
+        coverage_threshold=0
         #check if epoch coverage meets daily threshold
         if coverage >= coverage_threshold:
             logger.info("Sufficient amount of data collected")
@@ -391,24 +412,27 @@ def process_activity_metrics(study_folder: str, output_folder: str, beiwe_id: st
             df = find_non_wear_segments(df, sd_non_wear_threshold, non_wear_window)
 
             #calulate daily physical activity metrics
-            temp_metrics = calculate_daily_metrics(df)
+            #temp_metrics = calculate_daily_metrics(df)
 
             all_epochs.append(df)
-            metrics.append(temp_metrics)
+            #metrics.append(temp_metrics)
         else:
             logger.info(f"Insufficient coverage: {d_datetime} will not be processed")
 
+    if len(all_epochs) < 1:
+        logger.info("Little to no data available for " + user + ". Terminating.")
+        sys.exit(0)
     all_epochs = pd.concat(all_epochs)
-    metrics = pd.DataFrame(metrics)
+    #metrics = pd.DataFrame(metrics)
 
     logger.info("Writing results to file")
     output_file_epochs = user + "_epochs.csv"
     dest_path_epochs = os.path.join(output_folder, "daily", output_file_epochs)
-    all_epochs.to_csv(dest_path_epochs, index=False)
+    all_epochs.to_csv(dest_path_epochs, index=True)
 
-    output_file_metrics = user + "_daily_pa_metrics.csv"
-    dest_path_metrics = os.path.join(output_folder, "daily", output_file_metrics)
-    metrics.to_csv(dest_path_metrics, index=False)
+    #output_file_metrics = user + "_daily_pa_metrics.csv"
+    #dest_path_metrics = os.path.join(output_folder, "daily", output_file_metrics)
+    #metrics.to_csv(dest_path_metrics, index=False)
 
     t2 = perf_counter()
     logger.info("COMPLETE: {0:4.2f}s".format(t2-t1))
